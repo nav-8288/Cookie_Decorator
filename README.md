@@ -1,14 +1,8 @@
-CSE 453 (Spring 2026) – Cookie Decorator Firmware Progress Update
-Overview
+Firmware Progress Summary
 
-The current firmware establishes the early control framework for the Cookie Decorator system. It now includes debounced user inputs, RGB LED state feedback, software-controlled A4988 driver enabling, cookie size selection and scaling, a basic state machine, and a first coordinated XY motion prototype for tracing a placeholder UB logo path.
+Current firmware includes debounced input handling using the Bounce2 library.
 
-At this stage, the firmware is mainly focused on validating control flow, safety behavior, and XY motion. Extrusion during printing, homing, and limit-switch logic are still upcoming.
-
-Current Implemented Features
-1. Debounced user inputs using Bounce2
-
-The firmware uses the Bounce2 library with INPUT_PULLUP inputs and a 15 ms debounce interval for the following controls:
+Implemented user inputs:
 
 Print switch: A9
 
@@ -20,19 +14,7 @@ Cookie size LARGE switch: D2
 
 Cookie size SMALL switch: D3
 
-The code uses Bounce2 event methods such as:
-
-fell() for button press detection
-
-rose() for button release detection
-
-changed() for switch changes
-
-Serial messages are printed for verification during testing.
-
-2. 4-motor pin mapping configured
-
-STEP and DIR control pins are currently assigned for all four motion channels:
+STEP and DIR pins are mapped for all four motion channels:
 
 X axis: DIR D6, STEP D7
 
@@ -52,43 +34,15 @@ Z_ENABLE = D22
 
 EX_ENABLE = D23
 
-This sets up the firmware-side pin structure for the full 4-motor system.
+A4988 driver ENABLE is treated as active LOW:
 
-3. A4988 enable control implemented
+drivers start disabled for safety
 
-The firmware treats A4988 ENABLE as active LOW.
+drivers are enabled only during motion
 
-Current behavior:
+kill disables all drivers immediately
 
-drivers are initialized disabled for safety
-
-enableDriver() sets an enable pin LOW
-
-disableAllDrivers() sets all enable pins HIGH
-
-drivers are only enabled during motion
-
-kill immediately disables all drivers
-
-This provides a safer default behavior than leaving the stepper drivers always enabled.
-
-4. Basic state machine added
-
-The firmware currently uses the following system states:
-
-IDLE
-
-PRINTING
-
-COMPLETED
-
-NEEDS_REFILL
-
-REFILL_CLEAN
-
-KILLED
-
-The core active states in the current code are:
+Basic firmware states are implemented:
 
 IDLE
 
@@ -100,11 +54,9 @@ REFILL_CLEAN
 
 KILLED
 
-NEEDS_REFILL has been defined for future expansion, but it is not yet fully integrated into the behavior logic.
+NEEDS_REFILL is defined for future use but not fully implemented yet
 
-5. RGB LED state feedback working
-
-The RGB LED reflects the current machine state:
+RGB LED state feedback is working:
 
 Blue = IDLE
 
@@ -116,177 +68,76 @@ Red = KILLED
 
 Purple = REFILL_CLEAN
 
-The firmware also provides temporary cookie-size feedback through the LED:
+Cookie size feedback is also implemented:
 
 SMALL = orange flash
 
 LARGE = white flash
 
-After the size flash expires, the LED automatically returns to the current state color.
+LED returns to the active system-state color after the flash ends
 
-6. Cookie size selection and scaling implemented
+Cookie size scaling is implemented:
 
-The firmware supports two cookie size selections:
+LARGE uses full scale
 
-SIZE_SMALL
+SMALL uses a reduced scale based on the ratio 2.375 / 4.25
 
-SIZE_LARGE
+A first UB logo motion prototype is implemented using a normalized point list:
 
-On startup, initCookieSizeFromSwitches() reads the physical switch positions and selects the initial cookie size. The firmware also watches for runtime changes and updates the active size accordingly.
+current path is a rough placeholder, not the final UB outline
 
-The print path uses a uniform scale factor through:
+points are scaled into mm dimensions
 
-float cookieScale()
+mm motion is converted into step counts using placeholder X_STEPS_PER_MM and Y_STEPS_PER_MM values
 
-Current scaling behavior:
+Coordinated XY motion is implemented using a Bresenham-style stepping routine:
 
-LARGE = full scale (1.0)
+X and Y move together along straight path segments
 
-SMALL = scaled down using the ratio 2.375 / 4.25
+current motion testing is focused on shape, scaling, and control flow
 
-This allows one path definition to be reused for multiple cookie sizes.
+Kill behavior is integrated into the motion routines:
 
-7. UB logo minimap path prototype added
-
-A first point-based motion prototype is now implemented for the UB logo using:
-
-struct Pt { float x; float y; bool extrude; };
-
-The current ub_path[] contains a rough placeholder outline of the UB logo using normalized coordinates from 0.0 to 1.0.
-
-The function:
-
-runMinimapPath(const Pt *path, int n, int pulseUs)
-
-does the following:
-
-reads the cookie size scale
-
-converts normalized path coordinates into mm dimensions
-
-converts mm dimensions into step counts
-
-calls moveXY() for each segment
-
-The current design area is:
-
-width = 30.0 mm * scale
-
-height = 20.0 mm * scale
-
-This is still an early motion test path and not the final traced UB design.
-
-8. Coordinated XY motion implemented
-
-The moveXY() function performs coordinated two-axis stepping using Bresenham-style logic.
-
-This allows the X and Y motors to move together along straight segments instead of moving one axis completely before the other. That gives better path behavior for future printing.
-
-Current moveXY() behavior includes:
-
-enabling X and Y drivers during motion
-
-setting axis direction from the sign of the step count
-
-stepping both axes based on accumulated error
-
-stopping immediately if kill is triggered
-
-This is the first real coordinated XY drawing routine in the firmware.
-
-9. Kill logic integrated into motion
-
-Kill behavior is active both in the main control loop and inside movement routines.
-
-When kill is triggered:
-
-killRequested becomes true
-
-system state changes to KILLED
+active motion stops immediately when kill is triggered
 
 all drivers are disabled
 
 LED changes to red
 
-current motion exits immediately
+system enters KILLED
 
-This kill protection is already built into:
+Refill/Clean mode is partially implemented:
 
-moveXY()
+entering refill mode sets the LED to purple
 
-jogAxis()
+extruder performs a short reverse jog
 
-10. Refill/Clean mode prototype added
+pressing the refill/clean button again exits the mode
 
-The refill/clean button toggles a service mode using REFILL_CLEAN.
+Current limitations:
 
-Current behavior:
+extrusion during print motion is not implemented yet
 
-entering refill/clean mode sets the LED purple
+limit switch logic is not added yet
 
-the extruder motor performs a short reverse jog
+homing is not implemented yet
 
-pressing the refill/clean button again exits the mode and returns the system to idle
+end-stop protection is not implemented yet
 
-This currently serves as a simple extruder service test and will be expanded later.
+final UB logo path is not implemented yet
 
-Current Limitations
+X_STEPS_PER_MM and Y_STEPS_PER_MM still need calibration
 
-The following features are not finished yet:
+Next steps:
 
-limit switch logic
+verify X/Y direction and motion scale
 
-homing for X, Y, and Z
+calibrate steps/mm
 
-end-stop protection
+replace the placeholder UB path with a more accurate design
 
-active extrusion during print motion
+integrate extrusion during print segments
 
-final UB logo geometry
+add limit switches and homing logic
 
-stricter mode restrictions during printing/refill/kill
-
-automatic refill detection
-
-full NEEDS_REFILL behavior
-
-calibration of X_STEPS_PER_MM and Y_STEPS_PER_MM
-
-The extrude field already exists in the point list, but it is not currently used to drive the extruder during path execution.
-
-Next Steps
-Motion validation
-
-verify correct X and Y motor direction
-
-confirm expected physical scale of movement
-
-calibrate X_STEPS_PER_MM
-
-calibrate Y_STEPS_PER_MM
-
-Path refinement
-
-replace the placeholder UB path with a more accurate traced outline
-
-refine dimensions and margins
-
-validate scaling on both cookie sizes
-
-Extrusion integration
-
-begin using the extrude flag during print segments
-
-add synchronized extruder motion with XY travel
-
-test frosting flow behavior
-
-Safety and machine control
-
-add limit switch pins and logic
-
-implement homing for X/Y/Z
-
-prevent motion into end stops
-
-enforce stronger restrictions between PRINTING, REFILL_CLEAN, and KILLED
+strengthen state restrictions between print, refill, and kill modes
