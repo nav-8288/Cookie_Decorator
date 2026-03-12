@@ -258,15 +258,12 @@ void setLED(int r, int g, int b){
   analogWrite(LED_B, b);
 }
 
-void initDriver(int enPin, int dirPin, int stepPin, int sleepResetPin) {
+void initDriver(int enPin, int dirPin, int stepPin) {
   pinMode(enPin, OUTPUT);
   pinMode(dirPin, OUTPUT);
   pinMode(stepPin, OUTPUT);
-  pinMode(sleepResetPin, OUTPUT);
 
   digitalWrite(enPin, HIGH);            // disable outputs first (active LOW)
-  digitalWrite(sleepResetPin, HIGH);    // wake + not in reset
-
   delay(2);                             // settle time like your working test
 
   digitalWrite(stepPin, LOW);           // clean STEP state
@@ -341,10 +338,10 @@ void setup() {
 
   /*Initialize DIR and STEP FOR ALL 4 DRIVERS*/
 
-  initDriver(X_ENABLE, X_DIR, X_STEP, X_SLEEP_RESET);
-  initDriver(Y_ENABLE, Y_DIR, Y_STEP, Y_SLEEP_RESET);
-  initDriver(Z_ENABLE, Z_DIR, Z_STEP, Z_SLEEP_RESET);
-  initDriver(EX_ENABLE, EX_DIR, EX_STEP, EX_SLEEP_RESET);
+  initDriver(X_ENABLE, X_DIR, X_STEP);
+  initDriver(Y_ENABLE, Y_DIR, Y_STEP);
+  initDriver(Z_ENABLE, Z_DIR, Z_STEP);
+  initDriver(EX_ENABLE, EX_DIR, EX_STEP);
 
 
 
@@ -488,3 +485,4 @@ if (bSize_LARGE.changed() || bSize_SMALL.changed()) {
 
 
 }
+
