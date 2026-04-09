@@ -3,11 +3,6 @@
 
 /*INCLUDE LOGIC FOR LIMIT SWITCHES */
 
-#include <math.h>
-#include <Bounce2.h> /*bounce 2 library used for reading peripherals such as buttons or switches*/
-
-/*INCLUDE LOGIC FOR LIMIT SWITCHES */
-
 #define LED_R 44 /* dig pin 44 */
 #define LED_G 45 /*dig pin 45*/
 #define LED_B 46 /*dig pin 46*/
@@ -63,9 +58,21 @@ void moveXY(long dxSteps, long dySteps, int pulseUs);
 void enableDriver(int ENABLE_PIN);
 void disableAllDrivers();
 void stepOnce(int step_pin, int pulse);
+void liftTool();
+void lowerTool();
 
-const float X_STEPS_PER_MM = 80.0; // TODO: calibrate
-const float Y_STEPS_PER_MM = 80.0; // TODO: calibrate
+const float X_STEPS_PER_MM = 160.0; // TODO: calibrate
+const float Y_STEPS_PER_MM = 160.0; // TODO: calibrate
+
+const int Z_PULSE_US = 800;
+
+/*change these after testing*/
+const int Z_LIFT_STEPS = 1600;     // how many microsteps to raise tool
+const int Z_LOWER_STEPS = 1600;    // how many microsteps to lower tool
+
+/*adjust these booleans if Z moves opposite of what you want*/
+const bool Z_UP_DIR = true;
+const bool Z_DOWN_DIR = false;
 
 void setLED(int r, int g, int b);
 
@@ -696,8 +703,8 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
   float s = cookieScale();
 
   /*design area on cookie in mm*/
-  const float W = 30.0 * s;
-  const float H = 20.0 * s;
+  const float W = 70.0 * s;
+  const float H = 45.0 * s;
 
   /*Bounds of imported UB logo coordinates*/
   const float logoMinX = 0.0;
@@ -718,6 +725,11 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
   float curXmm = (path[0].x - logoMinX) * scale;
   float curYmm = (path[0].y - logoMinY) * scale;
 
+  bool toolIsDown = false;
+
+  /*Make sure tool starts lifted before any travel*/
+  liftTool();
+
   for (int i = 1; i < n; i++) {
     float tgtXmm = (path[i].x - logoMinX) * scale;
     float tgtYmm = (path[i].y - logoMinY) * scale;
@@ -725,14 +737,30 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
     long dxSteps = lround((tgtXmm - curXmm) * X_STEPS_PER_MM);
     long dySteps = lround((tgtYmm - curYmm) * Y_STEPS_PER_MM);
 
+    /*If this segment is meant to draw, lower tool first*/
+    if (path[i].penDown && !toolIsDown) {
+      lowerTool();
+      toolIsDown = true;
+      if (state == KILLED) return;
+    }
+
+    /*If this segment is meant to travel, lift tool first*/
+    if (!path[i].penDown && toolIsDown) {
+      liftTool();
+      toolIsDown = false;
+      if (state == KILLED) return;
+    }
+
     moveXY(dxSteps, dySteps, pulseUs);
     if (state == KILLED) return;
 
-    /*Later, if penDown is true, step extruder here*/
-    /*For now this just traces the full UB logo with X/Y*/
-
     curXmm = tgtXmm;
     curYmm = tgtYmm;
+  }
+
+  /*Lift tool at the end so it does not drag after finishing*/
+  if (toolIsDown) {
+    liftTool();
   }
 }
 
@@ -740,8 +768,8 @@ void runMinimapPath(const Pt *path, int n, int pulseUs) {
   float s = cookieScale();
 
   // large cookie design area (mm) with margins
- const float W = 30.0 * s;
-const float H = 20.0 * s;
+ const float W = 70.0 * s;
+const float H = 45.0 * s;
 
   float curXmm = path[0].x * W;
   float curYmm = path[0].y * H;
@@ -926,6 +954,14 @@ void jogAxis(int enPin, int dirPin, int stepPin, bool dir, int steps, int pulseU
 
   // done stepping this axis
 disableAllDrivers();}
+
+void liftTool() {
+  jogAxis(Z_ENABLE, Z_DIR, Z_STEP, Z_UP_DIR, Z_LIFT_STEPS, Z_PULSE_US);
+}
+
+void lowerTool() {
+  jogAxis(Z_ENABLE, Z_DIR, Z_STEP, Z_DOWN_DIR, Z_LOWER_STEPS, Z_PULSE_US);
+}
 
 
 void setup() {
