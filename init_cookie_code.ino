@@ -36,6 +36,11 @@
 #define Z_ENABLE 22 /*For dig pin D22*/
 #define EX_ENABLE A1 /*For dig pin A1*/
 
+#define Y_LIMIT_SW 24 /*Y back/home limit switch ; Black(COM)->GND, Gray(NC)->A3*/
+#define X_LIMIT_SW 25 /*X home limit switch ; Black(COM)->GND, Gray(NC)->25*/
+#define Z_LIMIT_SW 26 /*Z bottom/home limit switch ; Black(COM)->GND, Gray(NC)->26*/
+
+
 
 // Generated Arduino point data
 struct PlotPoint {
@@ -54,12 +59,21 @@ float cookieScale();
 void runLogoPath(const PlotPoint *path, int n, int pulseUs);
 void runMinimapPath(const Pt *path, int n, int pulseUs);
 void moveXY(long dxSteps, long dySteps, int pulseUs);
+void setLED(int r, int g, int b);
 
 void enableDriver(int ENABLE_PIN);
 void disableAllDrivers();
 void stepOnce(int step_pin, int pulse);
 void liftTool();
 void lowerTool();
+bool isYLimitPressed();
+void homeYAxis();
+bool isXLimitPressed();
+void homeXAxis();
+bool isZLimitPressed();
+void homeZAxis();
+void moveToPrintStart();
+void returnToHome();
 
 const float X_STEPS_PER_MM = 160.0; // TODO: calibrate
 const float Y_STEPS_PER_MM = 160.0; // TODO: calibrate
@@ -74,10 +88,9 @@ const int Z_LOWER_STEPS = 1600;    // how many microsteps to lower tool
 const bool Z_UP_DIR = true;
 const bool Z_DOWN_DIR = false;
 
-void setLED(int r, int g, int b);
-
-
-
+/*OFFSET FOR THE PRINT TO START AWAY FROM HOMED CORNER */
+const float PRINT_START_X_MM = 15.0; /*start 15mm away from X home */
+const float PRINT_START_Y_MM = 15.0; /*start 15mm away from Y home */
 
 
 const int NUM_POINTS = 582;
@@ -792,7 +805,6 @@ const float H = 45.0 * s;
 }
 
 
-// Move X/Y together to draw a straight line
 void moveXY(long dxSteps, long dySteps, int pulseUs) {
   enableDriver(X_ENABLE);
   enableDriver(Y_ENABLE);
@@ -803,6 +815,9 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
   long ax = labs(dxSteps);
   long ay = labs(dySteps);
 
+  bool xMovingBackward = (dxSteps > 0);   // flip if needed
+  bool yMovingBackward = (dySteps < 0);   // flip if needed
+
   long err = ax - ay;
   long cx = 0, cy = 0;
 
@@ -811,18 +826,31 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
       Serial.println("KILL detected during moveXY!");
       state = KILLED;
       disableAllDrivers();
-      setLED(255, 0, 0); // Red
+      setLED(255, 0, 0);
       return;
     }
 
     long e2 = 2 * err;
 
     if (e2 > -ay && cx < ax) {
+      if (xMovingBackward && isXLimitPressed()) {
+        Serial.println("X limit hit - stopping backward X motion");
+        disableAllDrivers();
+        return;
+      }
+
       err -= ay;
       stepOnce(X_STEP, pulseUs);
       cx++;
     }
+
     if (e2 < ax && cy < ay) {
+      if (yMovingBackward && isYLimitPressed()) {
+        Serial.println("Y limit hit - stopping backward Y motion");
+        disableAllDrivers();
+        return;
+      }
+
       err += ax;
       stepOnce(Y_STEP, pulseUs);
       cy++;
@@ -941,19 +969,26 @@ void jogAxis(int enPin, int dirPin, int stepPin, bool dir, int steps, int pulseU
   digitalWrite(dirPin, dir ? HIGH : LOW);
 
   for (int i = 0; i < steps; i++) {
-    // hard kill check (active-low)
     if (killRequested) {
-  Serial.println("KILL detected during jog!");
-  state = KILLED;
-  disableAllDrivers();
-  setLED(255, 0, 0); // SET TO RED
-  return;
-}
+      Serial.println("KILL detected during jog!");
+      state = KILLED;
+      disableAllDrivers();
+      setLED(255, 0, 0);
+      return;
+    }
+
+    /*Prevent Z from driving farther downward into the bottom switch*/
+    if (enPin == Z_ENABLE && dir == Z_DOWN_DIR && isZLimitPressed()) {
+      Serial.println("Z limit hit - stopping downward Z motion");
+      disableAllDrivers();
+      return;
+    }
+
     stepOnce(stepPin, pulseUs);
   }
 
-  // done stepping this axis
-disableAllDrivers();}
+  disableAllDrivers();
+}
 
 void liftTool() {
   jogAxis(Z_ENABLE, Z_DIR, Z_STEP, Z_UP_DIR, Z_LIFT_STEPS, Z_PULSE_US);
@@ -963,14 +998,147 @@ void lowerTool() {
   jogAxis(Z_ENABLE, Z_DIR, Z_STEP, Z_DOWN_DIR, Z_LOWER_STEPS, Z_PULSE_US);
 }
 
+bool isYLimitPressed() {
+  /*NC + INPUT_PULLUP wiring:
+    normal state = LOW
+    pressed / hit = HIGH
+  */
+  return digitalRead(Y_LIMIT_SW) == HIGH;
+}
+
+bool isXLimitPressed() {
+  /*NC + INPUT_PULLUP wiring:
+    normal state = LOW
+    pressed / hit = HIGH
+  */
+  return digitalRead(X_LIMIT_SW) == HIGH;
+}
+
+void homeXAxis() {
+  Serial.println("Homing X axis...");
+
+  enableDriver(X_ENABLE);
+
+  /*Move X toward the limit switch*/
+  digitalWrite(X_DIR, HIGH);   // if wrong direction, change HIGH to LOW
+
+  while (!isXLimitPressed()) {
+    if (killRequested) {
+      Serial.println("KILL detected during X homing!");
+      state = KILLED;
+      disableAllDrivers();
+      setLED(255, 0, 0);
+      return;
+    }
+
+    stepOnce(X_STEP, 1000);
+  }
+
+  Serial.println("X limit hit.");
+
+  /*Back off a little so it is not sitting on the switch*/
+  digitalWrite(X_DIR, LOW);   // opposite of home direction
+  for (int i = 0; i < 400; i++) {
+    stepOnce(X_STEP, 1000);
+  }
+
+  disableAllDrivers();
+  Serial.println("X homing complete.");
+}
+
+void homeYAxis() {
+  Serial.println("Homing Y axis...");
+
+  enableDriver(Y_ENABLE);
+
+  /*Move Y backward toward the limit switch*/
+  digitalWrite(Y_DIR, HIGH);   // if wrong direction, change LOW to HIGH
+
+  while (!isYLimitPressed()) {
+    if (killRequested) {
+      Serial.println("KILL detected during Y homing!");
+      state = KILLED;
+      disableAllDrivers();
+      setLED(255, 0, 0);
+      return;
+    }
+
+    stepOnce(Y_STEP, 1000);
+  }
+
+  Serial.println("Y limit hit.");
+
+  /*Back off a little so it is not sitting on the switch*/
+  digitalWrite(Y_DIR, LOW);  // opposite of home direction
+  for (int i = 0; i < 400; i++) {
+    stepOnce(Y_STEP, 1000);
+  }
+
+  disableAllDrivers();
+  Serial.println("Y homing complete.");
+}
+
+bool isZLimitPressed() {
+  /*NC + INPUT_PULLUP wiring:
+    normal state = LOW
+    pressed / hit = HIGH
+  */
+  return digitalRead(Z_LIMIT_SW) == HIGH;
+}
+
+void homeZAxis() {
+  Serial.println("Homing Z axis...");
+
+  enableDriver(Z_ENABLE);
+
+  /*Move Z downward toward the bottom limit switch*/
+  digitalWrite(Z_DIR, Z_DOWN_DIR ? HIGH : LOW);
+
+  while (!isZLimitPressed()) {
+    if (killRequested) {
+      Serial.println("KILL detected during Z homing!");
+      state = KILLED;
+      disableAllDrivers();
+      setLED(255, 0, 0);
+      return;
+    }
+
+    stepOnce(Z_STEP, 1200);
+  }
+
+  Serial.println("Z limit hit.");
+
+  /*Back off a little upward so it is not sitting on the switch*/
+  digitalWrite(Z_DIR, Z_UP_DIR ? HIGH : LOW);
+  for (int i = 0; i < 200; i++) {
+    stepOnce(Z_STEP, 1200);
+  }
+
+  disableAllDrivers();
+  Serial.println("Z homing complete.");
+}
+
+void moveToPrintStart() {
+  long xSteps = lround(PRINT_START_X_MM * X_STEPS_PER_MM);
+  long ySteps = lround(PRINT_START_Y_MM * Y_STEPS_PER_MM);
+
+  Serial.println("Moving to print start position...");
+
+  moveXY(xSteps, ySteps, 800);
+}
+
+void returnToHome() {
+  Serial.println("Returning to home position...");
+
+  homeXAxis();
+  homeYAxis();
+  homeZAxis();
+}
+
 
 void setup() {
   Serial.begin(115200); /*Initialize serial communication between arduino and monitor*/
   /*115200 describes baud rate (bits per second) */
-
-  
-
-
 
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
@@ -983,6 +1151,10 @@ void setup() {
   pinMode(refill_clean_PB, INPUT_PULLUP); /*Initialize refill/clean push button*/
   pinMode(cookie_size_SMALL, INPUT_PULLUP); /*Initialize cookie size switch SMALL */
   pinMode(cookie_size_LARGE, INPUT_PULLUP); /*Initialize cookie size switch SMALL */
+
+  pinMode(Y_LIMIT_SW, INPUT_PULLUP);
+  pinMode(X_LIMIT_SW, INPUT_PULLUP);
+  pinMode(Z_LIMIT_SW, INPUT_PULLUP);
 
   initCookieSizeFromSwitches();
   setLED(0,0, 255); /*Make sure LED still outputs BLUE for IDLE mode*/
@@ -1030,6 +1202,14 @@ Adding .interval() allows signal to stay stable for 15ms before accepting button
   bSize_SMALL.interval(15);
   bSize_LARGE.interval(15);
 
+  homeXAxis();
+
+  homeYAxis();
+
+  homeZAxis();
+
+  //moveToPrintStart();
+
 
   /*IF THE BUTTON HAS BEEN HELD FOR 15ms, accept the new state*/
 
@@ -1066,14 +1246,18 @@ if (bPrint.rose()) {
   showStateLED();
   Serial.println("Printing UB logo path...");
 
+  moveToPrintStart(); /*Print should begin from same known location even after prev print ended */
   runLogoPath(logoPoints, NUM_POINTS, 800);
 
   if (state != KILLED) {
-    state = COMPLETED;
-    showStateLED();
-    delay(1000);
-    state = IDLE;
-    showStateLED();
+  returnToHome();
+
+  state = COMPLETED;
+  showStateLED();
+  delay(1000);
+
+  state = IDLE;
+  showStateLED();
   }
 }
   
