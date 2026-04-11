@@ -8,7 +8,7 @@
 #define LED_B 46 /*dig pin 46*/
 
 #define print_SW A9 /* For dig Pin A9*/
-#define kill_PB A5 /*For dig pin A5 */
+#define kill_PB A1 /*For dig pin A1 */
 #define refill_clean_PB A0 /*For dig pin A0*/
 #define cookie_size_LARGE 2 /*For dig pin D2  */
 #define cookie_size_SMALL 3 /* For dig pin D3 */
@@ -34,11 +34,12 @@
 #define X_ENABLE 4 /*For dig pin D4*/
 #define Y_ENABLE 5 /*For dig pin D5*/
 #define Z_ENABLE 22 /*For dig pin D22*/
-#define EX_ENABLE A1 /*For dig pin A1*/
+#define EX_ENABLE A5 /*For dig pin A5*/
 
 #define Y_LIMIT_SW 24 /*Y back/home limit switch ; Black(COM)->GND, Gray(NC)->A3*/
 #define X_LIMIT_SW 25 /*X home limit switch ; Black(COM)->GND, Gray(NC)->25*/
 #define Z_LIMIT_SW 26 /*Z bottom/home limit switch ; Black(COM)->GND, Gray(NC)->26*/
+#define EX_LIMIT_SW 27 
 
 
 
@@ -74,6 +75,7 @@ bool isZLimitPressed();
 void homeZAxis();
 void moveToPrintStart();
 void returnToHome();
+void homeXYAxes();
 
 const float X_STEPS_PER_MM = 160.0; // TODO: calibrate
 const float Y_STEPS_PER_MM = 160.0; // TODO: calibrate
@@ -85,8 +87,8 @@ const int Z_LIFT_STEPS = 1600;     // how many microsteps to raise tool
 const int Z_LOWER_STEPS = 1600;    // how many microsteps to lower tool
 
 /*adjust these booleans if Z moves opposite of what you want*/
-const bool Z_UP_DIR = true;
-const bool Z_DOWN_DIR = false;
+const bool Z_UP_DIR = false;
+const bool Z_DOWN_DIR = true;
 
 /*OFFSET FOR THE PRINT TO START AWAY FROM HOMED CORNER */
 const float PRINT_START_X_MM = 15.0; /*start 15mm away from X home */
@@ -700,7 +702,10 @@ bool sizeFlashActive = false;
 
 
 
-typedef enum { SIZE_SMALL, SIZE_LARGE } CookieSize;
+typedef enum {
+   SIZE_SMALL, SIZE_LARGE 
+   } CookieSize;
+
 CookieSize cookieSize = SIZE_SMALL;
 
 /*Bounce objects store state of pin; Last reading (High/Low), last time changed, */
@@ -747,8 +752,8 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
     float tgtXmm = (path[i].x - logoMinX) * scale;
     float tgtYmm = (path[i].y - logoMinY) * scale;
 
-    long dxSteps = lround((tgtXmm - curXmm) * X_STEPS_PER_MM);
-    long dySteps = lround((tgtYmm - curYmm) * Y_STEPS_PER_MM);
+    long dxSteps = lround(-(tgtXmm - curXmm) * X_STEPS_PER_MM);
+    long dySteps = lround(-(tgtYmm - curYmm) * Y_STEPS_PER_MM);
 
     /*If this segment is meant to draw, lower tool first*/
     if (path[i].penDown && !toolIsDown) {
@@ -915,11 +920,7 @@ void initCookieSizeFromSwitches() {
   // If both are HIGH (or both LOW), leave default SIZE_SMALL (safe fallback)
 
   Serial.print("Boot Cookie Size = ");
-  if (cookieSize == SIZE_LARGE) {
-  Serial.println("LARGE");
-} else {
-  Serial.println("SMALL");
-}
+  Serial.println(cookieSize == SIZE_LARGE ? "LARGE" : "SMALL");
 
 flashCookieSizeLED(400); /*set the LED to match the cookie size  */
 }
@@ -1088,6 +1089,7 @@ bool isZLimitPressed() {
 
 void homeZAxis() {
   Serial.println("Homing Z axis...");
+  setLED(255, 0, 255);   /*Pink during homing*/
 
   enableDriver(Z_ENABLE);
 
@@ -1119,8 +1121,8 @@ void homeZAxis() {
 }
 
 void moveToPrintStart() {
-  long xSteps = lround(PRINT_START_X_MM * X_STEPS_PER_MM);
-  long ySteps = lround(PRINT_START_Y_MM * Y_STEPS_PER_MM);
+  long xSteps = lround(-PRINT_START_X_MM * X_STEPS_PER_MM);
+  long ySteps = lround(-PRINT_START_Y_MM * Y_STEPS_PER_MM);
 
   Serial.println("Moving to print start position...");
 
@@ -1133,6 +1135,62 @@ void returnToHome() {
   homeXAxis();
   homeYAxis();
   homeZAxis();
+}
+
+void homeXYAxes() {
+  Serial.println("Homing X and Y axes together...");
+  setLED(255, 0, 255);   /*Pink during homing*/
+
+  enableDriver(X_ENABLE);
+  enableDriver(Y_ENABLE);
+
+  bool xHomed = false;
+  bool yHomed = false;
+
+  /*Move both axes toward their limit switches*/
+  digitalWrite(X_DIR, HIGH);   // flip if needed
+  digitalWrite(Y_DIR, HIGH);   // flip if needed
+
+  while (!xHomed || !yHomed) {
+    if (killRequested) {
+      Serial.println("KILL detected during XY homing!");
+      state = KILLED;
+      disableAllDrivers();
+      setLED(255, 0, 0);
+      return;
+    }
+
+    if (!xHomed) {
+      if (isXLimitPressed()) {
+        xHomed = true;
+        Serial.println("X limit hit.");
+      } else {
+        stepOnce(X_STEP, 1000);
+      }
+    }
+
+    if (!yHomed) {
+      if (isYLimitPressed()) {
+        yHomed = true;
+        Serial.println("Y limit hit.");
+      } else {
+        stepOnce(Y_STEP, 1000);
+      }
+    }
+  }
+
+  /*Back off both axes a little from the switches*/
+  digitalWrite(X_DIR, LOW);   // opposite of homing direction
+  digitalWrite(Y_DIR, LOW);   // opposite of homing direction
+
+  for (int i = 0; i < 400; i++) {
+    stepOnce(X_STEP, 1000);
+    stepOnce(Y_STEP, 1000);
+  }
+
+  disableAllDrivers();
+
+  Serial.println("XY homing complete.");
 }
 
 
@@ -1157,7 +1215,7 @@ void setup() {
   pinMode(Z_LIMIT_SW, INPUT_PULLUP);
 
   initCookieSizeFromSwitches();
-  setLED(0,0, 255); /*Make sure LED still outputs BLUE for IDLE mode*/
+  //setLED(0,0, 255); /*Make sure LED still outputs BLUE for IDLE mode*/
 
 
   /*Initialize DIR and STEP FOR ALL 4 DRIVERS*/
@@ -1202,13 +1260,16 @@ Adding .interval() allows signal to stay stable for 15ms before accepting button
   bSize_SMALL.interval(15);
   bSize_LARGE.interval(15);
 
-  homeXAxis();
+  homeXYAxes();
 
-  homeYAxis();
+ 
 
   homeZAxis();
 
-  //moveToPrintStart();
+  state = IDLE ;
+  showStateLED();
+
+ // moveToPrintStart();
 
 
   /*IF THE BUTTON HAS BEEN HELD FOR 15ms, accept the new state*/
@@ -1302,21 +1363,25 @@ if (bPrint.rose()) {
 
 
 if (bSize_LARGE.changed() || bSize_SMALL.changed()) {
-  // re-evaluate based on actual pin levels
   bool largeActive = (digitalRead(cookie_size_LARGE) == LOW);
   bool smallActive = (digitalRead(cookie_size_SMALL) == LOW);
 
   if (largeActive && !smallActive) {
     cookieSize = SIZE_LARGE;
     Serial.println("Cookie Size set to LARGE");
-  } else if (smallActive && !largeActive) {
+    flashCookieSizeLED(1500);
+  } 
+  else if (smallActive && !largeActive) {
     cookieSize = SIZE_SMALL;
     Serial.println("Cookie Size set to SMALL");
+    flashCookieSizeLED(1500);
   }
-
-  flashCookieSizeLED(400); /*set the LED to match the cookie size  */
-
+  else {
+    Serial.println("Cookie size switch state invalid/ambiguous");
+  }
 }
+
+
 
 
 
