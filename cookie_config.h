@@ -80,4 +80,12 @@ const int EXTRUDER_PULSE_US = 800;         /*step pulse width for extruder*/
 const unsigned long EXTRUDER_PRIME_INTERVAL_US = 2500; /*continuous prime speed*/
 const int EXTRUDER_PRINT_STEP_DIVIDER = 3; /*smaller = more frosting during XY motion*/
 
+typedef enum {
+  SIZE_NONE,
+  SIZE_SMALL,
+  SIZE_LARGE
+} CookieSize;
+
+extern CookieSize cookieSize;
+
 #endif
