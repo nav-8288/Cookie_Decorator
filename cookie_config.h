@@ -5,6 +5,8 @@
 
 /*INCLUDE LOGIC FOR LIMIT SWITCHES */
 
+//pins 2, 3, 18, 19, 20 and 21 can only be used for interupts 
+
 #define LED_R 44 /* dig pin 44 */
 #define LED_G 45 /*dig pin 45*/
 #define LED_B 46 /*dig pin 46*/
