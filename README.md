@@ -1,143 +1,192 @@
-Firmware Progress Summary
+Functional behavior
 
-Current firmware includes debounced input handling using the Bounce2 library.
+1. Startup
 
-Implemented user inputs:
+On setup, the code:
 
-Print switch: A9
+initializes pins
+attaches debounce handlers
+attaches kill interrupt
+initializes all drivers
+homes the machine using returnToHome()
+enters IDLE
+reads cookie size switches
 
-Kill pushbutton: A5
 
-Refill/Clean pushbutton: A0
 
-Cookie size LARGE switch: D2
 
-Cookie size SMALL switch: D3
+2. State machine
 
-STEP and DIR pins are mapped for all four motion channels:
-
-X axis: DIR D6, STEP D7
-
-Y axis: DIR D8, STEP D9
-
-Z axis: DIR D10, STEP D11
-
-Extruder: DIR D12, STEP D13
-
-Driver enable pins are assigned as:
-
-X_ENABLE = D4
-
-Y_ENABLE = D5
-
-Z_ENABLE = D22
-
-EX_ENABLE = D23
-
-A4988 driver ENABLE is treated as active LOW:
-
-drivers start disabled for safety
-
-drivers are enabled only during motion
-
-kill disables all drivers immediately
-
-Basic firmware states are implemented:
-
+The sketch uses these states:
 IDLE
-
-PRINTING
-
+SIZE_SMALL_PRINT
+SIZE_LARGE_PRINT
 COMPLETED
-
+NEEDS_REFILL
 REFILL_CLEAN
-
 KILLED
 
-NEEDS_REFILL is defined for future use but not fully implemented yet
+STATE: IDLE
 
-RGB LED state feedback is working:
+Machine waits for user input.
 
-Blue = IDLE
+Behavior:
 
-Yellow = PRINTING
+reads cookie size switches
+print button:
+if small selected → SIZE_SMALL_PRINT
+if large selected → SIZE_LARGE_PRINT
+if no size selected → toggles extruder jog/prime mode
+refill button:
+enters REFILL_CLEAN
+SIZE_SMALL_PRINT / SIZE_LARGE_PRINT
 
-Green = COMPLETED
+Runs the print sequence:
 
-Red = KILLED
+move to print start offset
+print logo path
+return home
+go to COMPLETED
 
-Purple = REFILL_CLEAN
+Scaling depends on cookie size. Small uses a reduced scale factor; large uses full scale.
 
-Cookie size feedback is also implemented:
+STATE: COMPLETED
 
-SMALL = orange flash
+LED shows complete state, then returns to IDLE.
 
-LARGE = white flash
+STATE: NEEDS_REFILL
 
-LED returns to the active system-state color after the flash ends
+Entered when EX_LIMIT_SW is pressed during motion.
 
-Cookie size scaling is implemented:
+Behavior:
 
-LARGE uses full scale
+stops motion
+disables extruder
+waits for refill button
+on refill button press, returns to previous state
 
-SMALL uses a reduced scale based on the ratio 2.375 / 4.25
+Note: current implementation returns to the previous state, not the previous position in the job.
 
-A first UB logo motion prototype is implemented using a normalized point list:
+STATE: REFILL_CLEAN
 
-current path is a rough placeholder, not the final UB outline
+Can only be entered from IDLE.
 
-points are scaled into mm dimensions
+Behavior:
 
-mm motion is converted into step counts using placeholder X_STEPS_PER_MM and Y_STEPS_PER_MM values
+extruder disabled
+special LED color shown
+pressing refill button again exits back to IDLE
 
-Coordinated XY motion is implemented using a Bresenham-style stepping routine:
+STATE: KILLED
 
-X and Y move together along straight path segments
+Entered on kill interrupt.
 
-current motion testing is focused on shape, scaling, and control flow
+Behavior:
 
-Kill behavior is integrated into the motion routines:
+disables all drivers
+stops jog mode
+LED shows killed state
 
-active motion stops immediately when kill is triggered
+On kill release:
 
-all drivers are disabled
+drivers reinitialized
+machine attempts to return home
+state goes to IDLE
 
-LED changes to red
 
-system enters KILLED
 
-Refill/Clean mode is partially implemented:
+Motion system
+XY movement
 
-entering refill mode sets the LED to purple
+moveXY() uses a Bresenham-style synchronized stepping approach to move X and Y together for straight-line segments.
 
-extruder performs a short reverse jog
+Features:
 
-pressing the refill/clean button again exits the mode
+direction pins set from sign of target delta
+X and Y steps interleaved for coordinated motion
+checks kill and refill limit during motion
+optionally steps extruder during print states
+Z movement
 
-Current limitations:
+liftTool() and lowerTool() call jogAxis() with configured Z directions and step counts. Z parameters are defined in the config header.
 
-extrusion during print motion is not implemented yet
+Extruder
 
-limit switch logic is not added yet
+Two modes:
 
-homing is not implemented yet
+Prime/Jog mode in IDLE
+toggled by print button when no cookie size is selected
+extruder steps continuously using timed intervals
+Print mode
+extruder steps are tied to XY motion
+extrusion frequency controlled by EXTRUDER_PRINT_STEP_DIVIDER in config
+Homing behavior
+XY homing
 
-end-stop protection is not implemented yet
+homeXYAxes():
 
-final UB logo path is not implemented yet
+drives both axes toward home switches
+stops each axis when its switch is hit
+backs both axes off by 400 steps
+leaves step outputs stopped
+Z homing
 
-X_STEPS_PER_MM and Y_STEPS_PER_MM still need calibration
+homeZAxis():
 
-Next steps:
+drives Z downward until bottom switch is pressed
+backs upward 200 steps
+Return home
 
-verify X/Y direction and motion scale
+returnToHome() calls:
 
-calibrate steps/mm
+homeXYAxes()
+homeZAxis()
+LED status behavior
 
-replace the placeholder UB path with a more accurate design
+Current LED mapping:
 
-integrate extrusion during print segments
+KILLED → red
+COMPLETED → green
+NEEDS_REFILL → yellow
+REFILL_CLEAN → magenta
+SIZE_SMALL selected in idle → orange
+SIZE_LARGE selected in idle → white
+no size selected / default idle → blue
+Configurable parameters
 
-add limit switches and homing logic
+From the config header:
 
-strengthen state restrictions between print, refill, and kill modes
+Motion calibration
+X_STEPS_PER_MM = 160.0
+Y_STEPS_PER_MM = 160.0
+Z tuning
+Z_PULSE_US = 800
+Z_LIFT_STEPS = 1600
+Z_LOWER_STEPS = 1600
+Z_UP_DIR = false
+Z_DOWN_DIR = true
+Print start offset
+PRINT_START_X_MM = 15.0
+PRINT_START_Y_MM = 15.0
+Extruder tuning
+EXTRUDER_PRIME_DIR = true
+EXTRUDER_PRINT_DIR = true
+EXTRUDER_PULSE_US = 800
+EXTRUDER_PRIME_INTERVAL_US = 2500
+EXTRUDER_PRINT_STEP_DIVIDER = 3
+Logo path spec
+
+The print graphic is stored as an array of PlotPoint items, each containing:
+
+x
+y
+penDown
+
+The uploaded logo data contains NUM_POINTS = 582.
+
+The code scales the imported logo bounds from:
+
+X: 0.0 to 60.0
+Y: 0.0 to 30.11
+
+into a print area based on cookie size.
