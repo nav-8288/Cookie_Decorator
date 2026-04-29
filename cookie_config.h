@@ -35,7 +35,6 @@
 #define X_ENABLE 4 /*For dig pin D4*/
 #define Y_ENABLE 5 /*For dig pin D5*/
 #define Z_ENABLE 22 /*For dig pin D22*/
-#define EX_ENABLE A5 /*For dig pin A5*/
 
 #define Y_LIMIT_SW 24 /*Y back/home limit switch ; Black(COM)->GND, Gray(NC)->A3*/
 #define X_LIMIT_SW 25 /*X home limit switch ; Black(COM)->GND, Gray(NC)->25*/
