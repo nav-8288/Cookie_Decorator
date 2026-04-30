@@ -29,20 +29,27 @@
 #define Z_DIR 10 /*For dig pin D10*/
 #define Z_STEP 11 /*For dig pin D11*/
 
-/*FOR EXTRUDER*/
-#define EX_DIR 12 /*For dig pin D12*/
-#define EX_STEP 13 /*For dig pin D13*/
+
 
 /*Initialize ENABLE PINS FOR DRIVERS*/
 #define X_ENABLE 4 /*For dig pin D4*/
 #define Y_ENABLE 5 /*For dig pin D5*/
 #define Z_ENABLE 22 /*For dig pin D22*/
-#define EX_ENABLE A5 /*For dig pin A5*/
 
 #define Y_LIMIT_SW 24 /*Y back/home limit switch ; Black(COM)->GND, Gray(NC)->A3*/
 #define X_LIMIT_SW 25 /*X home limit switch ; Black(COM)->GND, Gray(NC)->25*/
 #define Z_LIMIT_SW 26 /*Z bottom/home limit switch ; Black(COM)->GND, Gray(NC)->26*/
-#define EX_LIMIT_SW 27 
+
+#define ACT_R_PWM 12    /* extend side PWM */
+#define ACT_L_PWM 13    /* retract side PWM */
+
+#define ACT_L_IS A6   /* current sense for one direction */
+#define ACT_R_IS A7   /* current sense for other direction */
+
+#define MAX_PWM 255
+#define RAMP_STEP 5
+#define RAMP_DELAY 20
+#define CURRENT_THRESHOLD 10
 
 // Generated Arduino point data
 struct PlotPoint {
@@ -75,12 +82,6 @@ const float PRINT_START_X_MM = 15.0; /*start 15mm away from X home */
 const float PRINT_START_Y_MM = 15.0; /*start 15mm away from Y home */
 
 
-/*EXTRUDER TUNING*/
-const bool EXTRUDER_PRIME_DIR = true;      /*manual prime direction*/
-const bool EXTRUDER_PRINT_DIR = true;      /*printing direction*/
-const int EXTRUDER_PULSE_US = 800;         /*step pulse width for extruder*/
-const unsigned long EXTRUDER_PRIME_INTERVAL_US = 2500; /*continuous prime speed*/
-const int EXTRUDER_PRINT_STEP_DIVIDER = 3; /*smaller = more frosting during XY motion*/
 
 typedef enum {
   SIZE_NONE,
