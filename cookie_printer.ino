@@ -80,13 +80,23 @@ void startPrintJob() {
 
   moveToPrintStart();
   if (killActive) return;
-
+  
   runLogoPath(logoPoints, NUM_POINTS, 800);
   if (killActive) return;
-
+  if (!currentDetected(ACT_R_IS)) {
+    stopActuator();
+    stateBeforeRefill = state;
+    state = NEEDS_REFILL;
+    return;
+  }
   returnToHome();
   if (killActive) return;
-
+  if (!currentDetected(ACT_R_IS)) {
+    stopActuator();
+    stateBeforeRefill = state;
+    state = NEEDS_REFILL;
+    return;
+  }
   state = COMPLETED;
   showStateLED();
   delay(1000);
@@ -126,10 +136,17 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
   /*Make sure tool starts lifted before any travel*/
   liftTool();
 
+  forwardActuator(); 
   for (int i = 1; i < n; i++) {
     // emergency button check
     if (killActive) {
       disableAllDrivers();
+      return;
+    }
+    if (!currentDetected(ACT_R_IS)) {
+      stopActuator();
+      stateBeforeRefill = state;
+      state = NEEDS_REFILL;
       return;
     }
     float tgtXmm = (path[i].x - logoMinX) * scale;
@@ -164,11 +181,17 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
       disableAllDrivers();
       return;
     }
-
+    if (!currentDetected(ACT_R_IS)) {
+      stopActuator();
+      stateBeforeRefill = state;
+      state = NEEDS_REFILL;
+      return;
+    }
     curXmm = tgtXmm;
     curYmm = tgtYmm;
   }
-
+  stopActuator();
+  actuatorJogging = false;
   /*Lift tool at the end so it does not drag after finishing*/
   if (toolIsDown) {
     liftTool();
@@ -519,17 +542,9 @@ void handleIdle() {
     actuatorJogging = false;
     return;
   }
-
   //check swicth portion
   initCookieSizeFromSwitches();
-  // enter refill/clean mode only from IDLE
-  if (bRefill.fell()) {
-    stopActuator();
-    actuatorJogging = false;
-    state = REFILL_CLEAN;
-    showStateLED();
-    return;
-  }
+
   // use Bounce instead of digitalRead
   if (bPrint.fell()) {  // button JUST pressed
 
@@ -602,6 +617,7 @@ void retractActuator() {
   }
 
   analogWrite(ACT_L_PWM, MAX_PWM);
+
 }
 
 void setup() {
@@ -705,22 +721,50 @@ void loop() {
     case REFILL_CLEAN:
       showStateLED();
 
+      // Press refill button again to leave refill/clean mode
       if (bRefill.fell()) {
         stopActuator();
         actuatorJogging = false;
-        
         state = IDLE;
         showStateLED();
+        break;
+      }
+
+      // Press print button to toggle retract on/off
+      if (bPrint.fell()) {
+        if (!actuatorJogging) {
+          retractActuator();
+          actuatorJogging = true;
+        } else {
+          stopActuator();
+          actuatorJogging = false;
+        }
+      }
+
+      // If actuator is retracting and current drops, stop it
+      if (actuatorJogging && !currentDetected(ACT_L_IS)) {
+        stopActuator();
+        actuatorJogging = false;
       }
       break;
 
     case NEEDS_REFILL:
-      extruderJogOn = false;
-      stopAllDrivers();
-      stopActuator();
       showStateLED();
 
+      if (!actuatorJogging) {
+        retractActuator();
+        actuatorJogging = true;
+      }
+      if (actuatorJogging && !currentDetected(ACT_L_IS)) {
+        stopActuator();
+        actuatorJogging = false;
+        returnToHome();
+        state = stateBeforeRefill;
+        showStateLED();
+      }
       if (bRefill.fell()) {
+        stopActuator();
+        actuatorJogging = false;
         returnToHome();
         state = stateBeforeRefill;
         showStateLED();
