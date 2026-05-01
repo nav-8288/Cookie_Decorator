@@ -9,13 +9,13 @@
 
 #define LED_R 44 /* dig pin 44 */
 #define LED_G 45 /*dig pin 45*/
-#define LED_B 46 /*dig pin 46*/
+#define LED_B 47 /*dig pin 46*/
 
 #define print_SW A9 /* For dig Pin A9*/
-#define kill_PB A1 /*For dig pin A1 */
+#define kill_PB 2 /*For dig pin A1 */
 #define refill_clean_PB A0 /*For dig pin A0*/
-#define cookie_size_LARGE 2 /*For dig pin D2  */
-#define cookie_size_SMALL 3 /* For dig pin D3 */
+#define cookie_size_LARGE 30 /*For dig pin D2  */
+#define cookie_size_SMALL 32 /* For dig pin D3 */
 
 /*FOR X AXIS*/
 #define X_DIR 6 /*For dig pin D6*/
