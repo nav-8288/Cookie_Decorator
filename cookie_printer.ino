@@ -143,7 +143,7 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
       disableAllDrivers();
       return;
     }
-    if (!currentDetected(ACT_R_IS)) {
+    if (!currentDetected(ACT_L_IS)) {
       stopActuator();
       stateBeforeRefill = state;
       state = NEEDS_REFILL;
@@ -536,7 +536,12 @@ void handleIdle() {
   }
   //check swicth portion
   initCookieSizeFromSwitches();
-
+  if (bRefill.fell()){
+        retractActuator();     // starts moving forward
+        actuatorJogging = true;
+        state = REFILL_CLEAN;
+        showStateLED();
+  }
   // use Bounce instead of digitalRead
   if (bPrint.fell()) {  // button JUST pressed
 
@@ -729,7 +734,7 @@ void loop() {
       // Press print button to toggle retract on/off
       if (bPrint.fell()) {
         if (!actuatorJogging) {
-          retractActuator();
+          forwardActuator();
           actuatorJogging = true;
         } else {
           stopActuator();
