@@ -65,7 +65,7 @@ Bounce bSize_LARGE = Bounce();
 
 // for the emerganince stop button so used in the interupt
 void triggerKill() {
-  if (digitalRead(kill_PB) == HIGH) {  // pressed with INPUT_PULLUP
+  if (digitalRead(kill_PB) == LOW) {  // pressed with INPUT_PULLUP
     killActive = true;
     killPressedEvent = true;
   } else {
@@ -275,14 +275,6 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
       stepOnce(Y_STEP, pulseUs);
       cy++;
       steppedXY = true;
-    }
-
-    if (extruderPrinting && steppedXY) {
-      motionLoops++;
-      if (motionLoops >= EXTRUDER_PRINT_STEP_DIVIDER) {
-        stepOnce(EX_STEP, EXTRUDER_PULSE_US);
-        motionLoops = 0;
-      }
     }
   }
 
@@ -560,9 +552,13 @@ void handleIdle() {
       if (!actuatorJogging) {
         forwardActuator();      // starts moving forward
         actuatorJogging = true;
+        state = REFILL_CLEAN;
+        showStateLED();
       } else {
         stopActuator();         // stops actuator
         actuatorJogging = false;
+        state = IDLE;
+        showStateLED();
       }
     }
   }
