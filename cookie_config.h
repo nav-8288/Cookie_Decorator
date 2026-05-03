@@ -46,10 +46,11 @@
 #define ACT_L_IS A6   /* current sense for one direction */
 #define ACT_R_IS A7   /* current sense for other direction */
 
-#define MAX_PWM 255
+#define MAX_PWM 50
 #define RAMP_STEP 5
 #define RAMP_DELAY 20
-#define CURRENT_THRESHOLD 10
+#define CURRENT_THRESHOLD 0
+#define CURRENT_SPIKE_THRESHOLD 250
 
 // Generated Arduino point data
 struct PlotPoint {
