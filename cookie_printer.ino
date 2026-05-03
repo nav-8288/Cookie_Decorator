@@ -12,7 +12,7 @@ void forwardActuator();
 void retractActuator();
 bool currentDetected(int currentPin);
 void stopActuator();
-
+bool currentSpikeDetected(int currentPin); 
 void enableDriver(int ENABLE_PIN);
 void disableAllDrivers();
 void stopAllDrivers();
@@ -63,6 +63,25 @@ Bounce bRefill = Bounce();
 Bounce bSize_SMALL = Bounce();
 Bounce bSize_LARGE = Bounce();
 
+bool currentSpikeDetected(int currentPin) {
+  int spikeCount = 0;
+
+  for (int i = 0; i < 5; i++) {
+    int val = analogRead(currentPin);
+
+    Serial.print("Current reading: ");
+    Serial.println(val);
+
+    if (val >= CURRENT_SPIKE_THRESHOLD) {
+      spikeCount++;
+    }
+
+    delay(10);
+  }
+
+  return spikeCount >= 4;
+}
+
 // for the emerganince stop button so used in the interupt
 void triggerKill() {
   if (digitalRead(kill_PB) == LOW) {  // pressed with INPUT_PULLUP
@@ -83,20 +102,7 @@ void startPrintJob() {
   
   runLogoPath(logoPoints, NUM_POINTS, 800);
   if (killActive) return;
-  if (!currentDetected(ACT_R_IS)) {
-    stopActuator();
-    stateBeforeRefill = state;
-    state = NEEDS_REFILL;
-    return;
-  }
-  returnToHome();
-  if (killActive) return;
-  if (!currentDetected(ACT_R_IS)) {
-    stopActuator();
-    stateBeforeRefill = state;
-    state = NEEDS_REFILL;
-    return;
-  }
+
   state = COMPLETED;
   showStateLED();
   delay(1000);
@@ -137,16 +143,12 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
   liftTool();
 
   forwardActuator(); 
+  actuatorJogging = true;
+    
   for (int i = 1; i < n; i++) {
     // emergency button check
     if (killActive) {
       disableAllDrivers();
-      return;
-    }
-    if (!currentDetected(ACT_L_IS)) {
-      stopActuator();
-      stateBeforeRefill = state;
-      state = NEEDS_REFILL;
       return;
     }
     float tgtXmm = (path[i].x - logoMinX) * scale;
@@ -177,14 +179,17 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
     }
 
     moveXY(dxSteps, dySteps, pulseUs);
+
     if (killActive) {
       disableAllDrivers();
       return;
     }
-    if (!currentDetected(ACT_R_IS)) {
+    if (currentDetected(ACT_R_IS)) {
       stopActuator();
       stateBeforeRefill = state;
       state = NEEDS_REFILL;
+      actuatorJogging = false;
+      showStateLED();
       return;
     }
     curXmm = tgtXmm;
@@ -536,38 +541,38 @@ void handleIdle() {
   }
   //check swicth portion
   initCookieSizeFromSwitches();
-  if (bRefill.fell()){
-        retractActuator();     // starts moving forward
-        actuatorJogging = true;
-        state = REFILL_CLEAN;
-        showStateLED();
-  }
   // use Bounce instead of digitalRead
   if (bPrint.fell()) {  // button JUST pressed
 
     if (cookieSize == SIZE_SMALL) {
       state = SIZE_SMALL_PRINT;
+      showStateLED();
       return;
 
     } else if (cookieSize == SIZE_LARGE) {
       state = SIZE_LARGE_PRINT;
+      showStateLED();
       return;
 
     } else {
       if (!actuatorJogging) {
         forwardActuator();      // starts moving forward
         actuatorJogging = true;
-        state = REFILL_CLEAN;
-        showStateLED();
-      } else {
-        stopActuator();         // stops actuator
-        actuatorJogging = false;
-        state = IDLE;
         showStateLED();
       }
     }
   }
 
+  if (bRefill.fell()&&cookieSize == SIZE_NONE ){
+        retractActuator();     // starts moving forward
+        actuatorJogging = true;
+        state = NEEDS_REFILL;
+        showStateLED();
+  }
+  if (actuatorJogging && currentSpikeDetected(ACT_R_IS)) {
+    stopActuator();
+    actuatorJogging = false;
+  }
 }
 
 void stopActuator() {
@@ -576,8 +581,19 @@ void stopActuator() {
 }
 
 bool currentDetected(int currentPin) {
-  int val = analogRead(currentPin);
-  return val > CURRENT_THRESHOLD;
+  int highCount = 0;
+
+  for (int i = 0; i < 10; i++) {
+    int val = analogRead(currentPin);
+
+    if (val <= CURRENT_THRESHOLD) {
+      highCount++;
+    }
+
+    delay(20);
+  }
+
+  return highCount >= 9;
 }
 
 // EXTEND / FORWARD
@@ -690,6 +706,7 @@ void loop() {
 
     state = KILLED;
     disableAllDrivers();
+    stopActuator();
     showStateLED();
   }
 
@@ -720,54 +737,55 @@ void loop() {
       break;
 
     case REFILL_CLEAN:
-      showStateLED();
-
-      // Press refill button again to leave refill/clean mode
-      if (bRefill.fell()) {
-        stopActuator();
-        actuatorJogging = false;
-        state = IDLE;
-        showStateLED();
-        break;
-      }
-
-      // Press print button to toggle retract on/off
+    
+      // Print button moves actuator forward
       if (bPrint.fell()) {
+        stopActuator();
+    
         if (!actuatorJogging) {
           forwardActuator();
           actuatorJogging = true;
         } else {
-          stopActuator();
           actuatorJogging = false;
         }
       }
-
-      // If actuator is retracting and current drops, stop it
-      if (actuatorJogging && !currentDetected(ACT_L_IS)) {
+    
+      // Refill button moves actuator backward/retract
+      if (bRefill.fell()) {
+        stopActuator();
+    
+        if (!actuatorJogging) {
+          retractActuator();
+          actuatorJogging = true;
+        } else {
+          actuatorJogging = false;
+        }
+      }
+    
+      // Stop if actuator reaches fully retracted position
+      if (actuatorJogging && currentDetected(ACT_L_IS)) {
         stopActuator();
         actuatorJogging = false;
+        state= IDLE;
       }
       break;
 
     case NEEDS_REFILL:
-      showStateLED();
 
       if (!actuatorJogging) {
         retractActuator();
         actuatorJogging = true;
       }
-      if (actuatorJogging && !currentDetected(ACT_L_IS)) {
+      if (actuatorJogging && currentDetected(ACT_L_IS)) {
         stopActuator();
         actuatorJogging = false;
-        returnToHome();
-        state = stateBeforeRefill;
+        state = IDLE;
         showStateLED();
       }
       if (bRefill.fell()) {
         stopActuator();
         actuatorJogging = false;
-        returnToHome();
-        state = stateBeforeRefill;
+        state = IDLE;
         showStateLED();
       }
       break;
@@ -775,6 +793,9 @@ void loop() {
     case COMPLETED:
       state = IDLE;
       showStateLED();
+      returnToHome();
+      stopActuator();
+      actuatorJogging = false;
       break;
 
     case KILLED:
