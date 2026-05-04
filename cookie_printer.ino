@@ -2,17 +2,26 @@
 #include "cookie_config.h"
 #include "logo_data.h"
 
+typedef enum {
+  ACTUATOR_ABORTED,
+  ACTUATOR_PULSE_DONE,
+  ACTUATOR_ENDSTOP,
+  ACTUATOR_LOAD
+} ActuatorResult;
+
 // --- prototypes ---
 float cookieScale();
 void runLogoPath(const PlotPoint *path, int n, int pulseUs);
 void moveXY(long dxSteps, long dySteps, int pulseUs);
 void setLED(int r, int g, int b);
-
-void forwardActuator();
+bool advanceActuatorForPoint();
+ActuatorResult pulseActuator(bool extend, unsigned long durationMs, bool enterRefillOnStop, bool stopOnLoad);
+ActuatorResult runActuatorUntilStop(bool extend, bool stopOnLoad);
+void extendActuator();
 void retractActuator();
-bool currentDetected(int currentPin);
 void stopActuator();
-bool currentSpikeDetected(int currentPin); 
+int readActuatorCurrent(bool extend);
+
 void enableDriver(int ENABLE_PIN);
 void disableAllDrivers();
 void stopAllDrivers();
@@ -31,6 +40,9 @@ void startPrintJob();
 void showStateLED();
 void initCookieSizeFromSwitches();
 void handleIdle();
+void handleRefillCleanState();
+void handleNeedsRefillState();
+void enterNeedsRefill();
 // ----- states -----
 typedef enum {
   IDLE,
@@ -50,10 +62,6 @@ State stateBeforeRefill = IDLE;
 volatile bool killActive = false;
 volatile bool killPressedEvent = false;
 volatile bool killReleasedEvent = false;
-
-bool actuatorJogging = false;
-
-unsigned long lastExtruderPrimeStepUs = 0;
 unsigned long sizeFlashUntilMs = 0;
 
 CookieSize cookieSize = SIZE_NONE;
@@ -63,28 +71,20 @@ Bounce bRefill = Bounce();
 Bounce bSize_SMALL = Bounce();
 Bounce bSize_LARGE = Bounce();
 
-bool currentSpikeDetected(int currentPin) {
-  int spikeCount = 0;
+//-------Helper Functions-----------
 
-  for (int i = 0; i < 5; i++) {
-    int val = analogRead(currentPin);
+void enterNeedsRefill() {
+  if (state == NEEDS_REFILL || state == KILLED) return;
 
-    Serial.print("Current reading: ");
-    Serial.println(val);
+  stateBeforeRefill = state;
+  state = NEEDS_REFILL;
 
-    if (val >= CURRENT_SPIKE_THRESHOLD) {
-      spikeCount++;
-    }
-
-    delay(10);
-  }
-
-  return spikeCount >= 4;
+  stopAllDrivers();
+  showStateLED();
 }
-
-// for the emerganince stop button so used in the interupt
+// for the emerganince stop button so used in the interupt 
 void triggerKill() {
-  if (digitalRead(kill_PB) == LOW) {  // pressed with INPUT_PULLUP
+  if (digitalRead(kill_PB) == LOW) {   // pressed with INPUT_PULLUP
     killActive = true;
     killPressedEvent = true;
   } else {
@@ -93,16 +93,17 @@ void triggerKill() {
   }
 }
 
-// starts printing based on the size of the cookie mode chosen
+// starts printing based on the size of the cookie mode chosen 
 void startPrintJob() {
+  stopActuator();
   showStateLED();
 
   moveToPrintStart();
-  if (killActive) return;
-  
+  if (killActive || state == NEEDS_REFILL) return;
   runLogoPath(logoPoints, NUM_POINTS, 800);
-  if (killActive) return;
-
+  if (killActive || state == NEEDS_REFILL) return;
+  returnToHome();
+  if (killActive || state == NEEDS_REFILL) return;
   state = COMPLETED;
   showStateLED();
   delay(1000);
@@ -142,9 +143,6 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
   /*Make sure tool starts lifted before any travel*/
   liftTool();
 
-  forwardActuator(); 
-  actuatorJogging = true;
-    
   for (int i = 1; i < n; i++) {
     // emergency button check
     if (killActive) {
@@ -174,33 +172,175 @@ void runLogoPath(const PlotPoint *path, int n, int pulseUs) {
         disableAllDrivers();
         return;
       }
-  
       toolIsDown = false;
     }
 
-    moveXY(dxSteps, dySteps, pulseUs);
+    if (path[i].penDown) {
+      if (!advanceActuatorForPoint()) {
+        return;
+      }
+    }
 
+    moveXY(dxSteps, dySteps, pulseUs);
     if (killActive) {
       disableAllDrivers();
-      return;
-    }
-    if (currentDetected(ACT_R_IS)) {
-      stopActuator();
-      stateBeforeRefill = state;
-      state = NEEDS_REFILL;
-      actuatorJogging = false;
-      showStateLED();
       return;
     }
     curXmm = tgtXmm;
     curYmm = tgtYmm;
   }
-  stopActuator();
-  actuatorJogging = false;
+
   /*Lift tool at the end so it does not drag after finishing*/
   if (toolIsDown) {
     liftTool();
   }
+
+  if (!killActive && state != NEEDS_REFILL) {
+    pulseActuator(false, ACT_RETRACT_MS, false, false);
+  }
+}
+
+int readActuatorCurrent(bool extend) {
+  return analogRead(extend ? ACT_R_IS : ACT_L_IS);
+}
+
+void extendActuator() {
+  analogWrite(ACT_L_PWM, 0);
+  analogWrite(ACT_R_PWM, ACT_PWM_SPEED);
+}
+
+void retractActuator() {
+  analogWrite(ACT_R_PWM, 0);
+  analogWrite(ACT_L_PWM, ACT_PWM_SPEED);
+}
+
+void stopActuator() {
+  analogWrite(ACT_R_PWM, 0);
+  analogWrite(ACT_L_PWM, 0);
+}
+
+ActuatorResult pulseActuator(bool extend, unsigned long durationMs, bool enterRefillOnStop, bool stopOnLoad) {
+  if (killActive) {
+    stopActuator();
+    disableAllDrivers();
+    return ACTUATOR_ABORTED;
+  }
+
+  unsigned long moveStartMs = millis();
+  unsigned long stopConditionStartMs = 0;
+  bool stopConditionActive = false;
+  unsigned long stallWindowMs = ACT_STALL_TIME_MS;
+  int loadThreshold = extend ? ACT_EXTEND_CURRENT_THRESHOLD : ACT_RETRACT_CURRENT_THRESHOLD;
+  ActuatorResult pendingStop = ACTUATOR_PULSE_DONE;
+
+  if (durationMs > 0 && durationMs < stallWindowMs) {
+    stallWindowMs = durationMs;
+  }
+
+  if (extend) {
+    extendActuator();
+  } else {
+    retractActuator();
+  }
+
+  while ((unsigned long)(millis() - moveStartMs) < durationMs) {
+    if (killActive) {
+      stopActuator();
+      disableAllDrivers();
+      return ACTUATOR_ABORTED;
+    }
+
+    int currentReading = readActuatorCurrent(extend);
+    ActuatorResult stopReason = ACTUATOR_PULSE_DONE;
+
+    if (currentReading <= ACT_ENDSTOP_CURRENT_THRESHOLD) {
+      stopReason = ACTUATOR_ENDSTOP;
+    } else if (stopOnLoad && currentReading >= loadThreshold) {
+      stopReason = ACTUATOR_LOAD;
+    }
+
+    if (stopReason != ACTUATOR_PULSE_DONE) {
+      if (!stopConditionActive || pendingStop != stopReason) {
+        stopConditionActive = true;
+        stopConditionStartMs = millis();
+        pendingStop = stopReason;
+      }
+
+      if ((unsigned long)(millis() - stopConditionStartMs) >= stallWindowMs) {
+        stopActuator();
+        if (extend && enterRefillOnStop) {
+          enterNeedsRefill();
+        }
+        return stopReason;
+      }
+    } else {
+      stopConditionActive = false;
+      pendingStop = ACTUATOR_PULSE_DONE;
+    }
+
+    delay(1);
+  }
+
+  stopActuator();
+  return ACTUATOR_PULSE_DONE;
+}
+
+ActuatorResult runActuatorUntilStop(bool extend, bool stopOnLoad) {
+  if (killActive) {
+    stopActuator();
+    disableAllDrivers();
+    return ACTUATOR_ABORTED;
+  }
+
+  unsigned long stopConditionStartMs = 0;
+  bool stopConditionActive = false;
+  int loadThreshold = extend ? ACT_EXTEND_CURRENT_THRESHOLD : ACT_RETRACT_CURRENT_THRESHOLD;
+  ActuatorResult pendingStop = ACTUATOR_PULSE_DONE;
+
+  if (extend) {
+    extendActuator();
+  } else {
+    retractActuator();
+  }
+
+  while (true) {
+    if (killActive) {
+      stopActuator();
+      disableAllDrivers();
+      return ACTUATOR_ABORTED;
+    }
+
+    int currentReading = readActuatorCurrent(extend);
+    ActuatorResult stopReason = ACTUATOR_PULSE_DONE;
+
+    if (currentReading <= ACT_ENDSTOP_CURRENT_THRESHOLD) {
+      stopReason = ACTUATOR_ENDSTOP;
+    } else if (stopOnLoad && currentReading >= loadThreshold) {
+      stopReason = ACTUATOR_LOAD;
+    }
+
+    if (stopReason != ACTUATOR_PULSE_DONE) {
+      if (!stopConditionActive || pendingStop != stopReason) {
+        stopConditionActive = true;
+        stopConditionStartMs = millis();
+        pendingStop = stopReason;
+      }
+
+      if ((unsigned long)(millis() - stopConditionStartMs) >= ACT_STALL_TIME_MS) {
+        stopActuator();
+        return stopReason;
+      }
+    } else {
+      stopConditionActive = false;
+      pendingStop = ACTUATOR_PULSE_DONE;
+    }
+
+    delay(1);
+  }
+}
+
+bool advanceActuatorForPoint() {
+  return pulseActuator(true, ACT_POINT_STEP_MS, true, false) == ACTUATOR_PULSE_DONE;
 }
 
 void runMinimapPath(const Pt *path, int n, int pulseUs) {
@@ -235,9 +375,6 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
   enableDriver(X_ENABLE);
   enableDriver(Y_ENABLE);
 
-  bool extruderPrinting = (state == SIZE_SMALL_PRINT || state == SIZE_LARGE_PRINT);
-  int motionLoops = 0;
-
   digitalWrite(X_DIR, (dxSteps >= 0) ? HIGH : LOW);
   digitalWrite(Y_DIR, (dySteps >= 0) ? HIGH : LOW);
 
@@ -256,7 +393,6 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
       return;
     }
     long e2 = 2 * err;
-    bool steppedXY = false;
 
     if (e2 > -ay && cx < ax) {
       if (xMovingBackward && isXLimitPressed()) {
@@ -267,7 +403,6 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
       err -= ay;
       stepOnce(X_STEP, pulseUs);
       cx++;
-      steppedXY = true;
     }
 
     if (e2 < ax && cy < ay) {
@@ -279,7 +414,6 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
       err += ax;
       stepOnce(Y_STEP, pulseUs);
       cy++;
-      steppedXY = true;
     }
   }
 
@@ -287,19 +421,19 @@ void moveXY(long dxSteps, long dySteps, int pulseUs) {
 }
 
 void showStateLED() {
-  if (state == KILLED) {
+  if (killActive == true) {
     setLED(255, 0, 0);
   } else if (state == COMPLETED) {
     setLED(0, 255, 0);
   } else if (state == NEEDS_REFILL) {
-    setLED(255, 255, 0);  // Yellow = needs refill
-  } else if (state == REFILL_CLEAN) {
+    setLED(255, 255, 0);   // Yellow = needs refill
+  }else if (state == REFILL_CLEAN) {
     setLED(255, 0, 255);
-  } else if (cookieSize == SIZE_SMALL) {
-    setLED(255, 80, 0);  // Orange = SMALL
-  } else if (cookieSize == SIZE_LARGE) {
-    setLED(255, 255, 255);  // White = LARGE
-  } else {
+  }else if (cookieSize == SIZE_SMALL ) {
+    setLED(255, 80, 0);        // Orange = SMALL
+  } else if (cookieSize == SIZE_LARGE ) {
+    setLED(255, 255, 255);     // White = LARGE
+  }  else {
     setLED(0, 0, 255);
   }
 }
@@ -308,7 +442,7 @@ float cookieScale() {
   if (cookieSize == SIZE_SMALL) {
     return 2.375 / 4.25;  // ~0.559
   }
-  return 1.0;  // LARGE or NONE defaults to full scale
+  return 1.0; // LARGE or NONE defaults to full scale
 }
 
 /*Function used to check which cookie-size switch is currently selected at POWER ON*/
@@ -330,7 +464,7 @@ void initCookieSizeFromSwitches() {
   }
 }
 
-void setLED(int r, int g, int b) {
+void setLED(int r, int g, int b){
   analogWrite(LED_R, r);
   analogWrite(LED_G, g);
   analogWrite(LED_B, b);
@@ -341,11 +475,11 @@ void initDriver(int enPin, int dirPin, int stepPin) {
   pinMode(dirPin, OUTPUT);
   pinMode(stepPin, OUTPUT);
 
-  digitalWrite(enPin, HIGH);  // disable outputs first (active LOW)
-  delay(2);                   // settle time like your working test
+  digitalWrite(enPin, HIGH);            // disable outputs first (active LOW)
+  delay(2);                             // settle time like your working test
 
-  digitalWrite(stepPin, LOW);  // clean STEP state
-  digitalWrite(dirPin, LOW);   // clean DIR state
+  digitalWrite(stepPin, LOW);           // clean STEP state
+  digitalWrite(dirPin, LOW);            // clean DIR state
 }
 
 void disableAllDrivers() {
@@ -353,21 +487,23 @@ void disableAllDrivers() {
   digitalWrite(X_ENABLE, HIGH);
   digitalWrite(Y_ENABLE, HIGH);
   digitalWrite(Z_ENABLE, HIGH);
+  stopActuator();
 }
 
-void stopAllDrivers() {
+void stopAllDrivers(){
   digitalWrite(X_STEP, LOW);
   digitalWrite(Y_STEP, LOW);
   digitalWrite(Z_STEP, LOW);
+  stopActuator();
 }
 
-//function used to set enable pins
-void enableDriver(int ENABLE_PIN) {
+//function used to set enable pins 
+void enableDriver(int ENABLE_PIN){
   digitalWrite(ENABLE_PIN, LOW);
 }
 
 /*function used to generate one clean STEP pulse on druvers step pin. Each pulse = one microstep*/
-void stepOnce(int step_pin, int pulse) {
+void stepOnce(int step_pin, int pulse){
   digitalWrite(step_pin, HIGH);
   delayMicroseconds(pulse);
   digitalWrite(step_pin, LOW);
@@ -385,7 +521,6 @@ void jogAxis(int enPin, int dirPin, int stepPin, bool dir, int steps, int pulseU
       disableAllDrivers();
       return;
     }
-
     /*Prevent Z from driving farther downward into the bottom switch*/
     if (enPin == Z_ENABLE && dir == Z_DOWN_DIR && isZLimitPressed()) {
       stopAllDrivers();
@@ -430,7 +565,6 @@ bool isZLimitPressed() {
   return digitalRead(Z_LIMIT_SW) == HIGH;
 }
 
-
 void homeZAxis() {
   //check emergency button
   if (killActive) {
@@ -455,7 +589,6 @@ void homeZAxis() {
       disableAllDrivers();
       return;
     }
-
     stepOnce(Z_STEP, 1200);
   }
   stopAllDrivers();
@@ -477,10 +610,10 @@ void returnToHome() {
 void homeXYAxes() {
   //check emergency button
   if (killActive) {
-    disableAllDrivers();
-    return;
+  disableAllDrivers();
+  return;
   }
-  setLED(255, 0, 255); /*Pink during homing*/
+  setLED(255, 0, 255);   /*Pink during homing*/
 
   enableDriver(X_ENABLE);
   enableDriver(Y_ENABLE);
@@ -489,8 +622,8 @@ void homeXYAxes() {
   bool yHomed = false;
 
   /*Move both axes toward their limit switches*/
-  digitalWrite(X_DIR, HIGH);  // flip if needed
-  digitalWrite(Y_DIR, HIGH);  // flip if needed
+  digitalWrite(X_DIR, HIGH);   // flip if needed
+  digitalWrite(Y_DIR, HIGH);   // flip if needed
 
   while (!xHomed || !yHomed) {
     //check emergency button
@@ -516,125 +649,98 @@ void homeXYAxes() {
   }
 
   /*Back off both axes a little from the switches*/
-  digitalWrite(X_DIR, LOW);  // opposite of homing direction
-  digitalWrite(Y_DIR, LOW);  // opposite of homing direction
+  digitalWrite(X_DIR, LOW);   // opposite of homing direction
+  digitalWrite(Y_DIR, LOW);   // opposite of homing direction
 
   for (int i = 0; i < 400; i++) {
     //check emergency button
     if (killActive) {
-      disableAllDrivers();
-      return;
+    disableAllDrivers();
+    return;
     }
     stepOnce(X_STEP, 1000);
     stepOnce(Y_STEP, 1000);
   }
 
   stopAllDrivers();
+
 }
-// th is function is for the action when the swicth is on idle and the print button is pressed
+// th is function is for the action when the swicth is on idle and the print button is pressed 
 void handleIdle() {
   // emergency stop
   if (killActive) {
     stopActuator();
-    actuatorJogging = false;
     return;
   }
-  //check swicth portion
+  //check swicth portion 
   initCookieSizeFromSwitches();
+  // enter refill/clean mode only from IDLE
+  if (bRefill.fell()) {
+    state = REFILL_CLEAN;
+    showStateLED();
+    runActuatorUntilStop(false, false);
+    return;
+  }
   // use Bounce instead of digitalRead
-  if (bPrint.fell()) {  // button JUST pressed
+  if (bPrint.fell()) {   // button JUST pressed
 
     if (cookieSize == SIZE_SMALL) {
+      stopActuator();
       state = SIZE_SMALL_PRINT;
-      showStateLED();
       return;
 
     } else if (cookieSize == SIZE_LARGE) {
+      stopActuator();
       state = SIZE_LARGE_PRINT;
-      showStateLED();
       return;
 
     } else {
-      if (!actuatorJogging) {
-        forwardActuator();      // starts moving forward
-        actuatorJogging = true;
-        showStateLED();
-      }
+      runActuatorUntilStop(true, true);
+      return;
     }
   }
-
-  if (bRefill.fell()&&cookieSize == SIZE_NONE ){
-        retractActuator();     // starts moving forward
-        actuatorJogging = true;
-        state = NEEDS_REFILL;
-        showStateLED();
-  }
-  if (actuatorJogging && currentSpikeDetected(ACT_R_IS)) {
-    stopActuator();
-    actuatorJogging = false;
-  }
 }
 
-void stopActuator() {
-  analogWrite(ACT_R_PWM, 0);
-  analogWrite(ACT_L_PWM, 0);
-}
+void handleRefillCleanState() {
+  stopActuator();
+  showStateLED();
 
-bool currentDetected(int currentPin) {
-  int highCount = 0;
+  if (bPrint.fell()) {
+    runActuatorUntilStop(true, false);
+    return;
+  }
 
-  for (int i = 0; i < 10; i++) {
-    int val = analogRead(currentPin);
-
-    if (val <= CURRENT_THRESHOLD) {
-      highCount++;
+  if (bRefill.fell()) {
+    if (runActuatorUntilStop(false, false) != ACTUATOR_ENDSTOP) {
+      return;
     }
-
-    delay(20);
+    state = IDLE;
+    showStateLED();
   }
-
-  return highCount >= 9;
 }
 
-// EXTEND / FORWARD
-void forwardActuator() {
-  if (killActive) return;
+void handleNeedsRefillState() {
+  stopAllDrivers();
+  showStateLED();
 
-  analogWrite(ACT_L_PWM, 0);
+  if (bPrint.fell()) {
+    runActuatorUntilStop(true, false);
+    return;
+  }
 
-  for (int pwm = 0; pwm <= MAX_PWM; pwm += RAMP_STEP) {
-    if (killActive) {
-      stopActuator();
-      actuatorJogging = false;
+  if (bRefill.fell()) {
+    if (runActuatorUntilStop(false, false) != ACTUATOR_ENDSTOP) {
       return;
     }
 
-    analogWrite(ACT_R_PWM, pwm);
-    delay(RAMP_DELAY);
-  }
-  
-  analogWrite(ACT_R_PWM, MAX_PWM);
-}
-
-// RETRACT
-void retractActuator() {
-  if (killActive) return;
-
-  analogWrite(ACT_R_PWM, 0);
-
-  for (int pwm = 0; pwm <= MAX_PWM; pwm += RAMP_STEP) {
+    returnToHome();
     if (killActive) {
-      stopActuator();
-      actuatorJogging = false;
       return;
     }
 
-    analogWrite(ACT_L_PWM, pwm);
-    delay(RAMP_DELAY);
+    state = stateBeforeRefill;
+    showStateLED();
   }
-
-  analogWrite(ACT_L_PWM, MAX_PWM);
-
 }
 
 void setup() {
@@ -645,15 +751,21 @@ void setup() {
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
 
-  pinMode(print_SW, INPUT_PULLUP);          /*Initialize print sw*/
-  pinMode(kill_PB, INPUT_PULLUP);           /*Initialize kill pb*/
-  pinMode(refill_clean_PB, INPUT_PULLUP);   /*Initialize refill/clean push button*/
+  pinMode(print_SW, INPUT_PULLUP); /*Initialize print sw*/
+  pinMode(kill_PB, INPUT_PULLUP); /*Initialize kill pb*/
+  pinMode(refill_clean_PB, INPUT_PULLUP); /*Initialize refill/clean push button*/
   pinMode(cookie_size_SMALL, INPUT_PULLUP); /*Initialize cookie size switch SMALL */
   pinMode(cookie_size_LARGE, INPUT_PULLUP); /*Initialize cookie size switch SMALL */
 
   pinMode(Y_LIMIT_SW, INPUT_PULLUP);
   pinMode(X_LIMIT_SW, INPUT_PULLUP);
   pinMode(Z_LIMIT_SW, INPUT_PULLUP);
+
+  pinMode(ACT_R_PWM, OUTPUT);
+  pinMode(ACT_L_PWM, OUTPUT);
+  pinMode(ACT_R_IS, INPUT);
+  pinMode(ACT_L_IS, INPUT);
+  stopActuator();
 
   attachInterrupt(digitalPinToInterrupt(kill_PB), triggerKill, CHANGE);
 
@@ -663,16 +775,9 @@ void setup() {
   initDriver(Y_ENABLE, Y_DIR, Y_STEP);
   initDriver(Z_ENABLE, Z_DIR, Z_STEP);
 
-  pinMode(ACT_L_PWM, OUTPUT);
-  pinMode(ACT_R_PWM, OUTPUT);
-
-  pinMode(ACT_L_IS, INPUT);
-  pinMode(ACT_R_IS, INPUT);
-
-  stopActuator();
   /*Each bounce obj should know which Arduino pin to read*/
-  bPrint.attach(print_SW);               /*tracks the state of pin A9*/
-  bRefill.attach(refill_clean_PB);       /*tracks the state of pin A0*/
+  bPrint.attach(print_SW); /*tracks the state of pin A9*/
+  bRefill.attach(refill_clean_PB); /*tracks the state of pin A0*/
   bSize_LARGE.attach(cookie_size_LARGE); /*tracks the state of pin D2*/
   bSize_SMALL.attach(cookie_size_SMALL); /*tracks the state of pin D3*/
 
@@ -686,9 +791,10 @@ void setup() {
 
   returnToHome();
 
-
-  state = IDLE;
+    
+  state = IDLE ;
   initCookieSizeFromSwitches();
+
 }
 
 void loop() {
@@ -706,7 +812,6 @@ void loop() {
 
     state = KILLED;
     disableAllDrivers();
-    stopActuator();
     showStateLED();
   }
 
@@ -716,16 +821,17 @@ void loop() {
     initDriver(X_ENABLE, X_DIR, X_STEP);
     initDriver(Y_ENABLE, Y_DIR, Y_STEP);
     initDriver(Z_ENABLE, Z_DIR, Z_STEP);
+    stopActuator();
     returnToHome();
     // safer to return to IDLE after kill release
-    state = IDLE;
+    state = IDLE; 
     showStateLED();
   }
 
   if (killActive) {
     return;
   }
-
+  
   switch (state) {
     case IDLE:
       handleIdle();
@@ -737,65 +843,16 @@ void loop() {
       break;
 
     case REFILL_CLEAN:
-    
-      // Print button moves actuator forward
-      if (bPrint.fell()) {
-        stopActuator();
-    
-        if (!actuatorJogging) {
-          forwardActuator();
-          actuatorJogging = true;
-        } else {
-          actuatorJogging = false;
-        }
-      }
-    
-      // Refill button moves actuator backward/retract
-      if (bRefill.fell()) {
-        stopActuator();
-    
-        if (!actuatorJogging) {
-          retractActuator();
-          actuatorJogging = true;
-        } else {
-          actuatorJogging = false;
-        }
-      }
-    
-      // Stop if actuator reaches fully retracted position
-      if (actuatorJogging && currentDetected(ACT_L_IS)) {
-        stopActuator();
-        actuatorJogging = false;
-        state= IDLE;
-      }
+        handleRefillCleanState();
       break;
 
     case NEEDS_REFILL:
-
-      if (!actuatorJogging) {
-        retractActuator();
-        actuatorJogging = true;
-      }
-      if (actuatorJogging && currentDetected(ACT_L_IS)) {
-        stopActuator();
-        actuatorJogging = false;
-        state = IDLE;
-        showStateLED();
-      }
-      if (bRefill.fell()) {
-        stopActuator();
-        actuatorJogging = false;
-        state = IDLE;
-        showStateLED();
-      }
+      handleNeedsRefillState();
       break;
 
     case COMPLETED:
       state = IDLE;
       showStateLED();
-      returnToHome();
-      stopActuator();
-      actuatorJogging = false;
       break;
 
     case KILLED:
