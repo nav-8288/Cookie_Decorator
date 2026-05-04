@@ -9,7 +9,7 @@
 
 #define LED_R 44 /* dig pin 44 */
 #define LED_G 45 /*dig pin 45*/
-#define LED_B 47 /*dig pin 46*/
+#define LED_B 46 /*dig pin 46*/
 
 #define print_SW A9 /* For dig Pin A9*/
 #define kill_PB 2 /*For dig pin A1 */
@@ -46,11 +46,15 @@
 #define ACT_L_IS A6   /* current sense for one direction */
 #define ACT_R_IS A7   /* current sense for other direction */
 
-#define MAX_PWM 50
-#define RAMP_STEP 5
-#define RAMP_DELAY 20
-#define CURRENT_THRESHOLD 0
-#define CURRENT_SPIKE_THRESHOLD 250
+const int ACT_PWM_SPEED = 200;   /* 0-255 */
+
+const int ACT_EXTEND_CURRENT_THRESHOLD = 600;   /* tune this */
+const int ACT_RETRACT_CURRENT_THRESHOLD = 600;  /* tune this */
+const unsigned long ACT_STALL_TIME_MS = 120;    /* tune this */
+
+/*optional timing tuning*/
+const unsigned long ACT_POINT_STEP_MS = 20;   /* small extend pulse per logo point */
+const unsigned long ACT_RETRACT_MS = 150;   /*small pullback after drawing*/
 
 // Generated Arduino point data
 struct PlotPoint {
