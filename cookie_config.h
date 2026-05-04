@@ -48,8 +48,13 @@
 
 const int ACT_PWM_SPEED = 200;   /* 0-255 */
 
-const int ACT_EXTEND_CURRENT_THRESHOLD = 600;   /* tune this */
-const int ACT_RETRACT_CURRENT_THRESHOLD = 600;  /* tune this */
+/* Current sense behavior:
+   - near 0 when the actuator reaches the end of travel
+   - above ~300 when the actuator is pushing under load
+*/
+const int ACT_ENDSTOP_CURRENT_THRESHOLD = 0;
+const int ACT_EXTEND_CURRENT_THRESHOLD = 300;
+const int ACT_RETRACT_CURRENT_THRESHOLD = 300;
 const unsigned long ACT_STALL_TIME_MS = 120;    /* tune this */
 
 /*optional timing tuning*/
